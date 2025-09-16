@@ -1,0 +1,97 @@
+---
+- name: Rotate Active Directory Account Passwords
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vault_addr: 'http://127.0.0.1:8200'
+
+  tasks:
+    - name: ping
+      ansible.builtin.ping:
+
+    - name: get connection creds
+      ansible.builtin.set_fact:
+        ansible_psrp_user: "{{ lookup('community.hashi_vault.vault_read', 'secret/data/hello', token=vault_token, url=vault_addr, as='raw') }}"
+        ansible_winrm_password: ""
+        vault_token: '{{ vault_token }}'
+      vars:
+        # Doing it this way leaves it up to environment vars to configure auth method and auth materials, which can be better abstracted in AAP. Alternately it allows using Vault Proxy or Vault Agent as the vault_addr
+        vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
+        vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
+
+        raw_conn_cred: "{{ lookup('community.hashi_vault.vault_read', 'ldap/us/static-cred/ansible-connector', auth_method='token', token=vault_token, url=vault_addr, as='raw') }}"
+
+
+
+- name: Update Active Directory Account Bindings
+  hosts: windows
+  gather_facts: false
+  serial: 500
+  vars:
+    vault_addr: 'http://127.0.0.1:8200'
+    vault_token: 'dummy'
+    is_demo: true
+    accounts_to_change:
+      # - name: 'MyUsername'
+      #   domain: 'US'
+      - username: 'SYSTEM'
+        domain: 'NT AUTHORITY'
+
+  tasks:
+    - name: Validate input
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.assert:
+        fail_msg: Local accounts are not permitted for this playbook
+        that:
+          - "'NT AUTHORITY' not in (accounts_to_change | selectattr('domain', 'defined') | map(attribute='domain') | map('upper'))"
+          - "'.' not in (accounts_to_change | selectattr('domain', 'defined') | map(attribute='domain'))"
+      when: not is_demo
+
+    - name: get connection creds
+      ansible.builtin.set_fact:
+        ansible_psrp_user: "{{ lookup('community.hashi_vault.vault_read', 'secret/data/hello', token=vault_token, url=vault_addr, as='raw') }}"
+        ansible_winrm_password: ""
+        vault_token: '{{ vault_token }}'
+      vars:
+        vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
+        vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
+        raw_cred: "{{ lookup('community.hashi_vault.vault_write', 'auth/approle/login', mount_point='auth/approle', auth_method='approle', url=vault_addr, as='raw') }}"
+
+
+    - name: ping
+      ansible.windows.win_ping:
+
+    - ansible.builtin.import_role:
+        name: win_password
+        tasks_from: survey.yml
+      vars: 
+        target_accounts: '{{ accounts_to_change }}'
+
+    - name: "DEBUG : Scheduled Task and Service users affected"
+      ansible.builtin.debug:
+        msg: |
+          {{
+            {
+              "scheduled_task_users": (scheduled_tasks_by_user.keys() | list),
+              "service_users": (services_by_user.keys() | list),
+              "account_to_sid": (username_normalizer.account_to_sid.keys() | list),
+              "sid_to_account": (username_normalizer.sid_to_account.keys() | list),
+            }
+          }}
+
+    - ansible.builtin.include_role:
+        name: win_password
+        tasks_from: schtask.yml
+      vars:
+        # username: '{{item.domain}}\{{ item.username }}'
+        username: '{{ username_normalizer.sid_to_account[user_sid] }}'
+        user_sid: '{{ username_normalizer.account_to_sid[raw_username] }}'
+        # raw_username: '{{ [item.domain, item.username] | flatten | join("\\") | lower }}'
+        raw_username: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
+        password: 'foo'
+      loop: '{{accounts_to_change}}'
+      loop_control:
+        loop_var: principal
+        label: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
+

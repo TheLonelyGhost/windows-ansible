@@ -1,0 +1,31 @@
+---
+- name: 'Update Scheduled Task'
+  ansible.windows.win_powershell:
+    script: |
+      param(
+          [PSObject]$TaskInfo,
+          [string]$Username,
+          [SecureString]$Password
+      )
+
+      # NOTE: Set-ScheduledTask requires [string], not [SecureString], for some reason, so convert it in a way that is compatible with older PowerShell.
+      $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+      $UnsecurePassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+
+      ForEach ($info in ($TaskInfo)) {
+        $task = $info.task_path + $info.task_name
+        Write-Output @{ target = $task; username = $Username; result = "success"; }
+
+        # TODO: Replace with real action
+        # Set-ScheduledTask -TaskName $task -User $Username -Password $UnsecurePassword
+      }
+    parameters:
+      TaskInfo: '{{ scheduled_tasks_by_user[username] }}'
+      Username: 'fizz'
+    sensitive_parameters:
+      - name: Password
+        value: 'buzz'
+    error_action: stop
+  register: result
+  failed_when: 'result.error is any'

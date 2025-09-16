@@ -1,0 +1,46 @@
+---
+- name: Setup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vault_addr: 'http://127.0.0.1:8200'
+
+  tasks:
+    - name: ping
+      ansible.builtin.ping:
+
+    - name: connect to Vault
+      ansible.builtin.set_fact:
+        vault_token: '{{ vault_token }}'
+      vars:
+        # Doing it this way leaves it up to environment vars to configure auth method and auth materials, which can be better abstracted in AAP. Alternately it allows using Vault Proxy or Vault Agent as the vault_addr
+        vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
+        vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
+
+    - ansible.builtin.uri:
+        url: "{{vault_addr}}/v1/ldap/us/static-cred/ansible-connector"
+        method: GET
+        return_content: true
+        headers:
+          "X-Vault-Token": '{{vault_token}}'
+      register: win_conn
+
+    - name: get connection creds
+      ansible.builtin.set_fact:
+        ansible_psrp_user: "{{ win_conn.json.data.username }}"
+        ansible_winrm_password: "{{ win_conn.json.data.password }}"
+
+    - ansible.builtin.debug:
+        msg: '{{win_conn.json}}'
+
+    # - name: get connection creds
+    #   ansible.builtin.set_fact:
+    #     ansible_psrp_user: "{{ raw_conn_cred.data.username }}"
+    #     ansible_winrm_password: "{{ raw_conn_cred.data.password }}"
+    #     vault_token: '{{ vault_token }}'
+    #   vars:
+    #     # Doing it this way leaves it up to environment vars to configure auth method and auth materials, which can be better abstracted in AAP. Alternately it allows using Vault Proxy or Vault Agent as the vault_addr
+    #     vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
+    #     vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
+
+    #     raw_conn_cred: "{{ lookup('community.hashi_vault.vault_read', 'ldap/us/static-cred/ansible-connector', auth_method='token', token=vault_token, url=vault_addr, as='raw') }}"

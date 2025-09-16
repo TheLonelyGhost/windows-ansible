@@ -1,0 +1,165 @@
+---
+- name: Survey Windows Services
+  ansible.windows.win_service_info:
+  register: win_svc_survey
+
+- name: Survey Windows Scheduled Tasks
+  ansible.windows.win_powershell:
+    script: |
+      $tasks = Get-ScheduledTask
+      ForEach ($task in ($tasks)) {
+        $user = $task.Principal.UserId
+        If (-not $user) {
+          # NOTE: Generally this is an at-login task that runs as the current
+          # user logging in, or something similar, where we would not have to
+          # worry about rotating AD account credentials.
+          continue
+        }
+
+        # Normalize various account names and aliases to 1 single account name
+        Switch ($user -as [string]) {
+          "SYSTEM" { $sid = "S-1-5-18" }
+          "LocalSystem" { $sid = "S-1-5-18" }
+          "NetworkService" { $sid = "S-1-5-19" }
+          "LocalService" { $sid = "S-1-5-20" }
+          default {
+            Try {
+              $sid = (New-Object -TypeName System.Security.Principal.NTAccount -ArgumentList $_).Translate([System.Security.Principal.SecurityIdentifier]).Value -as [string]
+            } Catch [System.Security.Principal.IdentityNotMappedException] {
+              # Fail the task, but continue as far as you can otherwise
+              Write-Error "Unable to map '$_' to a SID" -ErrorAction Continue
+              continue
+            }
+          }
+        }
+        $username = (New-Object -TypeName System.Security.Principal.SecurityIdentifier -ArgumentList $sid).Translate([System.Security.Principal.NTAccount]).Value
+
+        $obj = @{
+          username = ($username -as [string])
+          task_name = $task.TaskName
+          task_path = $task.TaskPath
+        }
+
+        Write-Output $obj
+      }
+  register: schtask_survey
+  changed_when: false
+  failed_when: 'schtask_survey.error is any'
+
+- name: Normalize Windows Usernames
+  # @see https://serverfault.com/a/168767/237027
+  ansible.windows.win_powershell:
+    script: |
+      param(
+        [string]$JsonListAccounts
+      )
+
+      $accounts = $JsonListAccounts | ConvertFrom-Json
+      $accountToSid = @{}
+      $sidToAccount = @{}
+
+      ForEach ($rawUsername in ($accounts)) {
+        # TODO: If username not in `$accountToSid` keys (case-insensitive), add it
+        If (($accountToSid.Keys | ? { $_ -eq $rawUsername }).length -gt 0) {
+          continue
+        }
+        
+        Switch ($rawUsername) {
+          "SYSTEM" { $sid = "S-1-5-18" }
+          "LocalSystem" { $sid = "S-1-5-18" }
+          "NetworkService" { $sid = "S-1-5-19" }
+          "LocalService" { $sid = "S-1-5-20" }
+          default {
+            Try {
+              $sid = (New-Object -TypeName System.Security.Principal.NTAccount -ArgumentList $_).Translate([System.Security.Principal.SecurityIdentifier]).Value -as [string]
+            } Catch [System.Security.Principal.IdentityNotMappedException] {
+              Write-Error "Unable to map '$_' to a SID" -ErrorAction Stop
+            }
+          }
+        }
+        $accountToSid[($rawUsername.ToLower())] = $sid
+
+        # TODO: If sid not in `$sidToAccount` keys, add it and set value to resolved account name
+        If (($sidToAccount.Keys | ? { $_ -eq $sid }).length -gt 0) {
+          continue
+        }
+
+        $username = (New-Object -TypeName System.Security.Principal.SecurityIdentifier -ArgumentList $sid).Translate([System.Security.Principal.NTAccount]).Value
+
+        $sidToAccount[$sid] = $username
+        $accountToSid[($username.ToLower())] = $sid
+      }
+
+      # TODO: Add translation helpers `$AccountToSid` and `$SidToAccount` as attributes on `$out`
+      $out = @{
+        sid_to_account = $sidToAccount
+        account_to_sid = $accountToSid
+      }
+      Write-Output $out
+    parameters:
+      JsonListAccounts: |
+        {%- set out = [] -%}
+        {%- for task in (schtask_survey.output) -%}
+          {%- set _ = out.append(task.username) -%}
+        {%- endfor -%}
+        {%- for svc in (win_svc_survey.services) -%}
+          {%- if svc.username -%}
+            {%- set _ = out.append(svc.username) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ out | unique | to_json }}
+    error_action: stop
+  register: normalized_ps
+  changed_when: false
+  failed_when: 'normalized_ps.error is any'
+
+- name: Filter to affected Active Directory accounts
+  ansible.builtin.set_fact:
+    scheduled_tasks_by_user: |
+      {%- set results = {} -%}
+      {%- for task in (schtask_survey.output) -%}
+        {%- if (task.username | lower) not in ['none'] -%}
+          {%- set username = username_normalizer.sid_to_account[username_normalizer.account_to_sid[task.username | lower]] -%}
+          {%- if (username | lower) in target_usernames -%}
+            {%- if username not in results -%}
+              {%- set _ = results.update({(username) : []}) -%}
+            {%- endif -%}
+            {%- set _ = results[username].append(task) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ results }}
+    services_by_user: |
+      {%- set results = {} -%}
+      {%- for svc in (win_svc_survey.services) -%}
+        {%- if (svc.username | lower) not in ['none'] -%}
+          {%- set username = username_normalizer.sid_to_account[username_normalizer.account_to_sid[svc.username | lower]] -%}
+          {%- if (username | lower) in target_usernames -%}
+            {%- if username not in results -%}
+              {%- set _ = results.update({(username) : []}) -%}
+            {%- endif -%}
+            {%- set _ = results[username].append(svc) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ results }}
+    username_normalizer: '{{ normalized_ps.output[0] }}'
+  changed_when: false
+  vars:
+    target_usernames: |
+      {%- set out = [] -%}
+      {%- for item in target_accounts -%}
+        {%- set obj = {
+          'username': None,
+          'domain': None,
+        } -%}
+        {%- set _ = obj.update(item) -%}
+        {%- if obj.domain -%}
+          {%- set username = [obj.domain, obj.username] | join("\\") | lower -%}
+        {%- else -%}
+          {%- set username = obj.username | lower -%}
+        {%- endif -%}
+        {%- set _ = out.append(username) -%}
+      {%- endfor -%}
+      {{ out }}
+    username_normalizer: '{{ normalized_ps.output[0] }}'

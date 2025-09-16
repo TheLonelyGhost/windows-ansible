@@ -1,0 +1,10 @@
+export ANSIBLE_INVENTORY=./inventory
+export ANSIBLE_HOME="$(pwd)"
+export ANSIBLE_PIPELINING='True'
+
+# TODO: Fill these out for your circumstance
+export ANSIBLE_HASHI_VAULT_ROLE_ID=
+export ANSIBLE_HASHI_VAULT_SECRET_ID=
+export ANSIBLE_HASHI_VAULT_AUTH_METHOD=approle
+export ANSIBLE_HASHI_VAULT_MOUNT_POINT=approle
+# vim: ft=sh
