@@ -1,0 +1,12 @@
+---
+- name: 'Update Service'
+  ansible.windows.win_service:
+    name: '{{svc.name}}'
+    username: '{{username}}'
+    password: '{{password}}'
+  register: result
+  failed_when: 'result.error is any'
+  loop: '{{ services_by_user[username] }}'
+  loop_control:
+    loop_var: svc
+    label: '{{ svc.name }}'

@@ -15,17 +15,18 @@
 
       ForEach ($info in ($TaskInfo)) {
         $task = $info.task_path + $info.task_name
-        Write-Output @{ target = $task; username = $Username; result = "success"; }
 
         # TODO: Replace with real action
-        # Set-ScheduledTask -TaskName $task -User $Username -Password $UnsecurePassword
+        Set-ScheduledTask -TaskName $task -User $Username -Password $UnsecurePassword
+
+        Write-Output @{ target = $task; username = $Username; result = "success"; }
       }
     parameters:
       TaskInfo: '{{ scheduled_tasks_by_user[username] }}'
-      Username: 'fizz'
+      Username: '{{username}}'
     sensitive_parameters:
       - name: Password
-        value: 'buzz'
+        value: '{{password}}'
     error_action: stop
   register: result
   failed_when: 'result.error is any'

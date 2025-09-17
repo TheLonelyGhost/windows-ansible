@@ -3,24 +3,35 @@
   hosts: localhost
   gather_facts: false
   vars:
-    vault_addr: 'http://127.0.0.1:8200'
+    vault_addr: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}"
+    conn_cred:
+      username: ansible-connector
+      domain: us
 
   tasks:
     - name: ping
       ansible.builtin.ping:
 
-    - name: get connection creds
+    - name: connect to Vault
       ansible.builtin.set_fact:
-        ansible_psrp_user: "{{ lookup('community.hashi_vault.vault_read', 'secret/data/hello', token=vault_token, url=vault_addr, as='raw') }}"
-        ansible_winrm_password: ""
         vault_token: '{{ vault_token }}'
       vars:
         # Doing it this way leaves it up to environment vars to configure auth method and auth materials, which can be better abstracted in AAP. Alternately it allows using Vault Proxy or Vault Agent as the vault_addr
         vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
         vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
 
-        raw_conn_cred: "{{ lookup('community.hashi_vault.vault_read', 'ldap/us/static-cred/ansible-connector', auth_method='token', token=vault_token, url=vault_addr, as='raw') }}"
+    - ansible.builtin.uri:
+        url: "{{vault_addr}}/v1/ldap/{{conn_cred.domain}}/static-cred/{{conn_cred.username}}"
+        method: GET
+        return_content: true
+        headers:
+          "X-Vault-Token": '{{vault_token}}'
+      register: win_conn
 
+    - name: get connection creds
+      ansible.builtin.set_fact:
+        ansible_psrp_user: "{{ win_conn.json.data.username }}"
+        ansible_winrm_password: "{{ win_conn.json.data.password }}"
 
 
 - name: Update Active Directory Account Bindings
@@ -28,14 +39,14 @@
   gather_facts: false
   serial: 500
   vars:
-    vault_addr: 'http://127.0.0.1:8200'
-    vault_token: 'dummy'
-    is_demo: true
-    accounts_to_change:
-      # - name: 'MyUsername'
-      #   domain: 'US'
-      - username: 'SYSTEM'
-        domain: 'NT AUTHORITY'
+    vault_addr: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}"
+    vault_token: '{{vault_token}}'
+    # TODO: Set these outside of the playbook
+    # accounts_to_change:
+    #   - name: 'MyUsername'
+    #     domain: 'US'
+    #   - username: 'SYSTEM'
+    #     domain: 'NT AUTHORITY'
 
   tasks:
     - name: Validate input
@@ -46,18 +57,29 @@
         that:
           - "'NT AUTHORITY' not in (accounts_to_change | selectattr('domain', 'defined') | map(attribute='domain') | map('upper'))"
           - "'.' not in (accounts_to_change | selectattr('domain', 'defined') | map(attribute='domain'))"
-      when: not is_demo
 
-    - name: get connection creds
-      ansible.builtin.set_fact:
-        ansible_psrp_user: "{{ lookup('community.hashi_vault.vault_read', 'secret/data/hello', token=vault_token, url=vault_addr, as='raw') }}"
-        ansible_winrm_password: ""
-        vault_token: '{{ vault_token }}'
-      vars:
-        vault_auth: "{{ lookup('community.hashi_vault.vault_login', url=vault_addr)}}"
-        vault_token: "{{ vault_auth | community.hashi_vault.vault_login_token }}"
-        raw_cred: "{{ lookup('community.hashi_vault.vault_write', 'auth/approle/login', mount_point='auth/approle', auth_method='approle', url=vault_addr, as='raw') }}"
+    - name: Retrieve current password
+      delegate_to: localhost
+      run_once: true
+      block:
+        - name: Retrieve from Vault
+          ansible.builtin.uri:
+            url: "{{vault_addr}}/v1/ldap/{{principal.domain | lower}}/static-cred/{{principal.username | lower}}"
+            method: GET
+            return_content: true
+            headers:
+              "X-Vault-Token": '{{vault_token}}'
+          register: target_account_resp
 
+        - name: Set facts
+          ansible.builtin.set_fact:
+            target_account_username: "{{target_account_resp.json.data.username}}"
+            target_account_password: "{{target_account_resp.json.data.password}}"
+
+      loop: '{{ accounts_to_change }}'
+      loop_control:
+        loop_var: principal
+        label: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
 
     - name: ping
       ansible.windows.win_ping:
@@ -75,14 +97,12 @@
             {
               "scheduled_task_users": (scheduled_tasks_by_user.keys() | list),
               "service_users": (services_by_user.keys() | list),
-              "account_to_sid": (username_normalizer.account_to_sid.keys() | list),
-              "sid_to_account": (username_normalizer.sid_to_account.keys() | list),
             }
           }}
 
     - ansible.builtin.include_role:
         name: win_password
-        tasks_from: schtask.yml
+        tasks_from: service.yml
       vars:
         # username: '{{item.domain}}\{{ item.username }}'
         username: '{{ username_normalizer.sid_to_account[user_sid] }}'
@@ -95,3 +115,30 @@
         loop_var: principal
         label: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
 
+    - ansible.builtin.include_role:
+        name: win_password
+        tasks_from: schtask.yml
+      vars:
+        # username: '{{item.domain}}\{{ item.username }}'
+        username: '{{ target_account_username }}'
+        user_sid: '{{ username_normalizer.account_to_sid[raw_username] }}'
+        # raw_username: '{{ [item.domain, item.username] | flatten | join("\\") | lower }}'
+        raw_username: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
+        password: '{{ target_account_password }}'
+      loop: '{{accounts_to_change}}'
+      loop_control:
+        loop_var: principal
+        label: '{{ principal.domain | lower }}\{{ principal.username | lower }}'
+
+    - ansible.builtin.include_role:
+        name: win_password
+        tasks_from: finalize.yml
+      vars:
+        services: |
+          {%- set results = [] -%}
+          {%- for username, svcs in services_by_user.items() -%}
+            {%- for svc in svcs -%}
+              {%- set _ = results.append(svc.name) -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{results}}

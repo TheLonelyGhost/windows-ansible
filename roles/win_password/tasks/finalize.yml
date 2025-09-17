@@ -1,0 +1,8 @@
+---
+- name: Restart affected services
+  ansible.windows.win_service:
+    name: '{{svc.name}}'
+    state: restarted
+  loop: '{{ service_names }}'
+  loop_control:
+    loop_var: svc
