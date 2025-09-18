@@ -1,0 +1,6 @@
+approle_role_id: "{{ lookup('ansible.builtin.env', 'VAULT_AUTH_APPROLE_ROLE_ID') }}"
+approle_secret_id: "{{ lookup('ansible.builtin.env', 'VAULT_AUTH_APPROLE_SECRET_ID') }}"
+vault_addr: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}"
+accounts_to_change:
+  - name: 'MyUsername'
+    domain: 'EXAMPLE'
