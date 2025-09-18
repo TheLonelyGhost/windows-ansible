@@ -7,25 +7,7 @@
   #     username: ansible-connector
   #     domain: us
 
-  tasks:
-    - name: ping
-      ansible.builtin.ping:
-
-    - name: Auth to Vault
-      ansible.builtin.uri:
-        url: "{{vault_addr}}/v1/auth/approle/login"
-        method: POST
-        return_content: true
-        body_format: json
-        body:
-          role_id: '{{ approle_role_id }}'
-          secret_id: '{{ approle_secret_id }}'
-      register: vault_auth
-
-    - name: Authenticate to Vault
-      ansible.builtin.set_fact:
-        vault_token: '{{ vault_auth.json.auth.client_token }}'
-
+  tasks: []
     # - ansible.builtin.uri:
     #     url: "{{vault_addr}}/v1/ldap/{{conn_cred.domain}}/static-cred/{{conn_cred.username}}"
     #     method: GET
@@ -45,7 +27,7 @@
   gather_facts: false
   serial: 500
   vars:
-    vault_token: '{{vault_token}}'
+    # vault_token: '{{vault_token}}'
     # TODO: Set these outside of the playbook
     # accounts_to_change:
     #   - name: 'MyUsername'
@@ -54,7 +36,33 @@
     #     domain: 'NT AUTHORITY'
 
   tasks:
-    - name: Validate input
+    - name: 'Preflight: Vault prerequisites'
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.assert:
+        fail_msg: Must include AppRole role_id and secret_id
+        that:
+          - 'approle_role_id exists'
+          - 'approle_secret_id exists'
+
+    - name: Auth to Vault
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{vault_addr}}/v1/auth/approle/login"
+        method: POST
+        return_content: true
+        body_format: json
+        body:
+          role_id: '{{ approle_role_id }}'
+          secret_id: '{{ approle_secret_id }}'
+      register: vault_auth
+
+    - name: Authenticate to Vault
+      ansible.builtin.set_fact:
+        vault_token: '{{ vault_auth.json.auth.client_token }}'
+
+    - name: Preflight Checks
       delegate_to: localhost
       run_once: true
       ansible.builtin.assert:
@@ -66,21 +74,9 @@
     - name: Retrieve current password
       delegate_to: localhost
       run_once: true
-      block:
-        - name: Retrieve from Vault
-          ansible.builtin.uri:
-            url: "{{vault_addr}}/v1/ldap/{{principal.domain | lower}}/static-cred/{{principal.username | lower}}"
-            method: GET
-            return_content: true
-            headers:
-              "X-Vault-Token": '{{vault_token}}'
-          register: target_account_resp
-
-        - name: Set facts
-          ansible.builtin.set_fact:
-            target_account_username: "{{target_account_resp.json.data.username}}"
-            target_account_password: "{{target_account_resp.json.data.password}}"
-
+      ansible.builtin.include_role:
+        name: win_password
+        tasks_from: vault_retrieve.yml
       loop: '{{ accounts_to_change }}'
       loop_control:
         loop_var: principal
@@ -97,6 +93,7 @@
 
     - name: "DEBUG : Scheduled Task and Service users affected"
       ansible.builtin.debug:
+        # verbosity: 1
         msg: |
           {{
             {
