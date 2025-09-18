@@ -72,8 +72,6 @@
           - "'.' not in (accounts_to_change | selectattr('domain', 'defined') | map(attribute='domain'))"
 
     - name: Retrieve current password
-      delegate_to: localhost
-      run_once: true
       ansible.builtin.include_role:
         name: win_password
         tasks_from: vault_retrieve.yml

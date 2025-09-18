@@ -1,5 +1,7 @@
 ---
 - name: Retrieve from Vault
+  delegate_to: localhost
+  run_once: true
   ansible.builtin.uri:
     url: "{{vault_addr}}/v1/ldap/{{principal.domain | lower}}/static-cred/{{principal.username | lower}}"
     method: GET
